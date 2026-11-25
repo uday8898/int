@@ -374,5 +374,73 @@ def overview():
     return dict(plazas=len(PLAZAS),open_alerts=sum(a["state"]=="new" for a in ALERTS),docs=len(CONTRACTS),obligations_90d=sum((date.fromisoformat(o["due"])-TODAY).days<=90 for o in OBLIGATIONS),
         anomalies_7d=len(anomalies(15,7)),validated=sum(v["status"]=="Confirmed" for v in VALID),validation_total=len(VALID),sources_ok=sum(s["status"].startswith("Validated") for s in SOURCES),sources_total=len(SOURCES))
 
+# ---------------- Persistence ----------------
+# Mutable demo state (alert reviews, feedback, rules, source/validation status, audit log, extracted
+# obligations) is stored in Upstash Redis when UPSTASH_REDIS_REST_URL/TOKEN (or Vercel's KV_REST_API_*)
+# are set, otherwise in backend/state.json locally. With neither (e.g. Vercel without a database) state is in-memory.
+import os, json, urllib.request
+from starlette.concurrency import run_in_threadpool
+_R_URL = os.getenv("UPSTASH_REDIS_REST_URL") or os.getenv("KV_REST_API_URL")
+_R_TOK = os.getenv("UPSTASH_REDIS_REST_TOKEN") or os.getenv("KV_REST_API_TOKEN")
+_KEY = "interise:state"
+_FILE = Path(__file__).resolve().parent / "state.json"
+_LISTS = {"ALERTS": ALERTS, "AUDIT": AUDIT, "OBLIGATIONS": OBLIGATIONS, "SOURCES": SOURCES, "VALID": VALID}
+
+def _redis(*cmd):
+    req = urllib.request.Request(_R_URL, data=json.dumps(list(cmd)).encode(),
+        headers={"Authorization": f"Bearer {_R_TOK}", "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=6) as r: return json.load(r).get("result")
+
+import copy
+_SEED = copy.deepcopy({**_LISTS, "RULES": RULES})
+
+def _enabled(): return bool(_R_URL and _R_TOK) or not os.getenv("VERCEL")
+
+def _read():
+    if _R_URL and _R_TOK: return _redis("GET", _KEY)
+    return _FILE.read_text(encoding="utf-8") if _FILE.exists() else None
+
+def _write(text):
+    if _R_URL and _R_TOK: _redis("SET", _KEY, text)
+    else: _FILE.write_text(text, encoding="utf-8")
+
+def _load():
+    global _ids
+    raw = _read()
+    if not raw: return
+    d = json.loads(raw)
+    for k, lst in _LISTS.items():
+        if k in d: lst[:] = d[k]
+    if "RULES" in d: RULES.clear(); RULES.update(d["RULES"])
+    nums = [int(a["id"][1:]) for a in ALERTS if a["id"][1:].isdigit()]
+    _ids = itertools.count(max(nums, default=0) + 1)
+
+def _save():
+    _write(json.dumps({**_LISTS, "RULES": RULES}))
+
+@app.middleware("http")
+async def persist_state(request, call_next):
+    api = request.url.path.startswith("/api") and request.url.path != "/api/health" and _enabled()
+    if api:
+        try: await run_in_threadpool(_load)
+        except Exception as e: print("state load failed:", e)
+    resp = await call_next(request)
+    if api and request.method != "GET" and resp.status_code < 400:
+        try: await run_in_threadpool(_save)
+        except Exception as e: print("state save failed:", e)
+    return resp
+
+@app.post("/api/reset")
+def reset_demo():
+    """Restores the seed data and clears the stored copy."""
+    global _ids
+    seed = copy.deepcopy(_SEED)
+    for k, lst in _LISTS.items(): lst[:] = seed[k]
+    RULES.clear(); RULES.update(seed["RULES"])
+    _ids = itertools.count(max((int(a["id"][1:]) for a in ALERTS), default=0) + 1)
+    if _R_URL and _R_TOK: _redis("DEL", _KEY)
+    elif _FILE.exists(): _FILE.unlink()
+    return {"ok": True}
+
 dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 if dist.exists(): app.mount("/", StaticFiles(directory=dist, html=True), name="ui")

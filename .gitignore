@@ -5,3 +5,4 @@ __pycache__/
 .env
 .claude/
 Interise_Phase2_Azure_AI_Proposal.pdf
+backend/state.json
