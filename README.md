@@ -22,3 +22,8 @@ Theme: primary #1149DC, accent #8D77FD, Bookman Old Style headings, Calibri body
 - /api/alerts, /api/scan -> Azure Functions + Azure Maps + Azure OpenAI over Fabric Lakehouse
 - /api/contracts/ask -> Azure AI Search + Azure OpenAI (citations)
 - /api/anomalies -> Fabric Notebooks / Azure ML scoring
+
+## Deploy (Vercel, free)
+Import the repo with the Root Directory left as the repo root. `vercel.json` builds `frontend/` and serves the FastAPI app from `api/index.py`.
+For persistence add the free **Upstash for Redis** integration (sets `KV_REST_API_URL` / `KV_REST_API_TOKEN`). Without it, state resets between requests.
+`POST /api/reset` restores the seed data.
